@@ -1,0 +1,50 @@
+[
+  {
+    "userId": "u_001",
+    "auth": {
+      "lastErrorCode": "EMAIL_NOT_VERIFIED",
+      "lastCodeRequestedAt": "2026-04-01T09:12:00Z",
+      "cooldownActive": false
+    },
+    "payments": {
+      "lastPaymentStatus": "completed",
+      "lastDeclineCategory": null
+    },
+    "subscription": {
+      "status": "active",
+      "renewalDate": "2026-04-15"
+    }
+  },
+  {
+    "userId": "u_002",
+    "auth": {
+      "lastErrorCode": null,
+      "lastCodeRequestedAt": "2026-04-01T08:55:00Z",
+      "cooldownActive": false
+    },
+    "payments": {
+      "lastPaymentStatus": "failed",
+      "lastDeclineCategory": "bank_declined"
+    },
+    "subscription": {
+      "status": "cancelled",
+      "renewalDate": null
+    }
+  },
+  {
+    "userId": "u_003",
+    "auth": {
+      "lastErrorCode": "TOO_MANY_ATTEMPTS",
+      "lastCodeRequestedAt": "2026-04-01T09:20:00Z",
+      "cooldownActive": true
+    },
+    "payments": {
+      "lastPaymentStatus": "pending",
+      "lastDeclineCategory": null
+    },
+    "subscription": {
+      "status": "active",
+      "renewalDate": "2026-04-20"
+    }
+  }
+]
