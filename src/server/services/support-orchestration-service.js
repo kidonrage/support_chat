@@ -22,6 +22,12 @@ function detectPreferredLanguage(text) {
   return "English";
 }
 
+function createSourceLinkPath(sourcePath) {
+  const normalizedPath = String(sourcePath || "").replace(/^\/+/, "");
+  const fullPath = normalizedPath.startsWith("knowledge_base/") ? normalizedPath : `knowledge_base/${normalizedPath}`;
+  return `/${fullPath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export class SupportOrchestrationService {
   constructor({
     ticketsRepository,
@@ -146,10 +152,12 @@ export class SupportOrchestrationService {
       timeoutMs: 90000,
     });
 
-    await this.messagesRepository.create({
+    const answerSources = this.buildAnswerSources(ragChunks);
+    const assistantMessage = await this.messagesRepository.create({
       ticketId: ticket.id,
       role: "assistant",
       text: answer,
+      sources: answerSources,
     });
 
     const updatedTicket = await this.ticketsRepository.update(ticket.id, {
@@ -163,6 +171,8 @@ export class SupportOrchestrationService {
     return {
       ticketId: updatedTicket.id,
       answer,
+      sources: answerSources,
+      assistantMessage,
       ticket: updatedTicket,
     };
   }
@@ -234,5 +244,16 @@ export class SupportOrchestrationService {
       "- Mention uncertainty when needed",
       "- Escalate to a human operator only when appropriate",
     ].join("\n");
+  }
+
+  buildAnswerSources(ragChunks) {
+    return ragChunks.map((chunk) => ({
+      id: chunk.id,
+      title: chunk.title,
+      source: chunk.source,
+      score: chunk.score,
+      excerpt: truncate(chunk.text, 220),
+      url: createSourceLinkPath(chunk.source),
+    }));
   }
 }

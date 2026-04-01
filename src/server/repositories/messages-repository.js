@@ -12,13 +12,14 @@ export class MessagesRepository {
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
   }
 
-  async create({ ticketId, role, text }) {
+  async create({ ticketId, role, text, sources = [] }) {
     const message = {
       id: createId("m"),
       ticketId,
       role,
       text,
       createdAt: nowIso(),
+      sources: Array.isArray(sources) ? sources : [],
     };
 
     await this.store.update((data) => ({

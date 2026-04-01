@@ -362,6 +362,54 @@ function renderMessages() {
     body.textContent = message.text;
 
     bubble.append(meta, body);
+
+    if (message.role === "assistant" && Array.isArray(message.sources) && message.sources.length > 0) {
+      const sourcesBlock = document.createElement("div");
+      sourcesBlock.className = "message__sources";
+
+      const sourcesLabel = document.createElement("p");
+      sourcesLabel.className = "message__sources-label";
+      sourcesLabel.textContent = "Sources";
+      sourcesBlock.append(sourcesLabel);
+
+      const sourcesList = document.createElement("div");
+      sourcesList.className = "message__sources-list";
+
+      message.sources.forEach((source) => {
+        const sourceCard = document.createElement("a");
+        sourceCard.className = "message__source";
+        sourceCard.href = source.url || "#";
+        sourceCard.target = "_blank";
+        sourceCard.rel = "noreferrer";
+
+        const sourceTitle = document.createElement("span");
+        sourceTitle.className = "message__source-title";
+        sourceTitle.textContent = source.title || source.source || "Source";
+
+        const sourceMeta = document.createElement("span");
+        sourceMeta.className = "message__source-meta";
+        sourceMeta.textContent = source.source || "";
+
+        sourceCard.append(sourceTitle);
+
+        if (source.source) {
+          sourceCard.append(sourceMeta);
+        }
+
+        if (source.excerpt) {
+          const sourceExcerpt = document.createElement("span");
+          sourceExcerpt.className = "message__source-excerpt";
+          sourceExcerpt.textContent = source.excerpt;
+          sourceCard.append(sourceExcerpt);
+        }
+
+        sourcesList.append(sourceCard);
+      });
+
+      sourcesBlock.append(sourcesList);
+      bubble.append(sourcesBlock);
+    }
+
     refs.messages.append(bubble);
   });
 
@@ -646,6 +694,7 @@ async function handleSendMessage(event, retryMessage = null) {
       state.activeMessages.push(
         makeTemporaryMessage("assistant", response.answer, {
           pending: false,
+          sources: response.sources || response.assistantMessage?.sources || [],
         })
       );
     }

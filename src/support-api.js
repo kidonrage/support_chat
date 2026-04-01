@@ -23,6 +23,14 @@ const DEFAULT_HEADERS = {
  *   role: "user" | "assistant" | "system",
  *   text: string,
  *   createdAt: string | null,
+ *   sources?: Array<{
+ *     id: string,
+ *     title: string,
+ *     source: string,
+ *     score: number,
+ *     excerpt: string,
+ *     url: string
+ *   }>,
  *   pending?: boolean,
  *   loading?: boolean
  * }} SupportMessage
@@ -113,6 +121,18 @@ function normalizeMessage(rawMessage, index) {
     role: normalizeRole(rawMessage),
     text: String(pickFirstDefined(rawMessage.text, rawMessage.message, rawMessage.content, "")),
     createdAt: pickFirstDefined(rawMessage.createdAt, rawMessage.timestamp, rawMessage.sentAt, null),
+    sources: Array.isArray(rawMessage.sources)
+      ? rawMessage.sources
+          .map((source) => ({
+            id: String(pickFirstDefined(source.id, source.source, `${index}`)),
+            title: String(pickFirstDefined(source.title, source.name, "Source")),
+            source: String(pickFirstDefined(source.source, "")),
+            score: Number(pickFirstDefined(source.score, 0)),
+            excerpt: String(pickFirstDefined(source.excerpt, "")),
+            url: String(pickFirstDefined(source.url, "")),
+          }))
+          .filter((source) => source.url || source.source || source.excerpt)
+      : [],
   };
 }
 
@@ -182,6 +202,10 @@ export class SupportApi {
     return {
       ticketId: resolvedTicketId,
       answer: String(pickFirstDefined(payload?.answer, payload?.message, "")),
+      sources: Array.isArray(payload?.sources)
+        ? normalizeMessage({ sources: payload.sources }, 0).sources
+        : normalizeMessage(payload?.assistantMessage || {}, 0).sources,
+      assistantMessage: payload?.assistantMessage ? normalizeMessage(payload.assistantMessage, 0) : null,
       ticket: ticket
         ? {
             ...ticket,
