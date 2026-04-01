@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "python3 -m http.server 3000",
-    "serve": "python3 -m http.server 3000"
+    "start": "node src/server/main.js",
+    "serve": "node src/server/main.js"
   }
 }

@@ -1,60 +1,123 @@
-# Support Chat Frontend
+# Support Chat Demo
 
-Minimal front-end for a support mini-service where one chat is always one ticket.
+Minimal support chat with a local frontend and a backend that models a realistic support pipeline:
 
-## Added files
+`create/load ticket -> save messages -> update summary -> retrieve RAG context -> load user context -> ask Ollama -> save answer`
 
-- `index.html` boots the application shell.
-- `src/app.js` contains the UI, state management, and product logic for tickets/messages.
-- `src/support-api.js` is a small HTTP client for the support backend.
-- `src/styles.css` contains the layout and chat styling.
-- `package.json` adds a zero-dependency static serve command.
+## Stack
 
-## Product logic
+- Frontend: plain HTML/CSS/JS from the existing project.
+- Backend: zero-dependency Node `http` server.
+- Storage: local JSON files in `runtime/`.
+- LLM: local Ollama.
+- Models:
+  - chat: `qwen3:8b`
+  - summarization: `qwen3:8b`
+  - embeddings: `embeddinggemma`
 
-- Every conversation is tied to exactly one ticket.
-- The left column shows all tickets for `u_001` with title, preview, status, and `updatedAt`.
-- The right side shows the selected ticket history.
-- Closed tickets are read-only. The composer is disabled and the user is told to create a new chat.
-- `New ticket` tries `POST /api/tickets` first. If the backend does not return a usable ticket yet, the UI falls back to a local draft and creates the real ticket on the first successful `POST /api/chat`.
-- The first successful chat response stores the returned `ticketId` and keeps using it for later messages.
+## Run
 
-## Expected backend endpoints
+1. Start Ollama and pull required models:
 
-- `GET /api/tickets?userId=u_001`
-- `GET /api/tickets/{ticketId}/messages`
-- `POST /api/chat`
-- `POST /api/tickets`
-- `POST /api/tickets/{ticketId}/close`
-
-Expected `POST /api/chat` request body:
-
-```json
-{
-  "userId": "u_001",
-  "ticketId": "t_123",
-  "message": "text"
-}
+```bash
+ollama pull qwen3:8b
+ollama pull embeddinggemma
+ollama serve
 ```
 
-Expected response shape:
-
-```json
-{
-  "ticketId": "t_123",
-  "answer": "text",
-  "ticket": {
-    "id": "t_123",
-    "title": "Login issue",
-    "status": "open"
-  }
-}
-```
-
-## Local run
-
-Start any static file server from the project root so browser requests to `/api/*` can be proxied or served by the real backend. One simple option:
+2. Start the app:
 
 ```bash
 npm start
 ```
+
+3. Open [http://127.0.0.1:3000](http://127.0.0.1:3000)
+
+The same process serves both the UI and `/api/*`.
+
+## API
+
+- `GET /api/health`
+- `GET /api/tickets?userId=u_001`
+- `GET /api/tickets/:ticketId/messages`
+- `POST /api/tickets`
+- `POST /api/tickets/:ticketId/close`
+- `POST /api/chat`
+
+`POST /api/tickets` body:
+
+```json
+{
+  "userId": "u_001"
+}
+```
+
+`POST /api/chat` body:
+
+```json
+{
+  "userId": "u_001",
+  "ticketId": null,
+  "message": "Почему не работает авторизация?"
+}
+```
+
+Response:
+
+```json
+{
+  "ticketId": "t_xxx",
+  "answer": "text",
+  "ticket": {
+    "id": "t_xxx",
+    "userId": "u_001",
+    "title": "Login issue after MFA",
+    "status": "open",
+    "summary": "User cannot sign in after changing device...",
+    "category": "login",
+    "createdAt": "2026-04-01T18:00:00.000Z",
+    "updatedAt": "2026-04-01T18:01:00.000Z",
+    "lastMessagePreview": "Most likely..."
+  }
+}
+```
+
+## Structure
+
+- `src/app.js` - frontend UI and support-flow behavior.
+- `src/support-api.js` - frontend client for the backend.
+- `src/server/main.js` - Node server, routing, static files.
+- `src/server/repositories/` - persistent ticket/message storage.
+- `src/server/services/ollama-client.js` - local Ollama client.
+- `src/server/services/summarization-service.js` - ticket summary/title/category updates.
+- `src/server/services/knowledge-base-service.js` - chunking, embeddings, local retrieval.
+- `src/server/services/user-context-service.js` - MCP-like local CRM integration from JSON.
+- `src/server/services/support-orchestration-service.js` - main support pipeline.
+- `data/users.json` - mock CRM/user context source.
+- `knowledge_base/` - local documents for retrieval.
+- `runtime/` - generated tickets, messages, and embedding index.
+
+## How the pipeline works
+
+1. `POST /api/chat` creates a ticket if `ticketId` is absent.
+2. The server rejects writes to closed tickets with a clear `409` error.
+3. The user message is persisted immediately.
+4. The server rebuilds the ticket summary with `qwen3:8b`, keeping summary state in the ticket.
+5. Retrieval query is built from `ticket summary + latest user message`.
+6. The RAG layer reads `knowledge_base/`, chunks documents, builds embeddings through Ollama, stores the index in `runtime/knowledge-index.json`, and returns top-k relevant chunks.
+7. The MCP-like user context layer reads `data/users.json` and returns structured account context plus recent signals.
+8. The server assembles the final prompt from:
+   - ticket summary
+   - recent messages
+   - user context
+   - ticket metadata
+   - retrieved docs
+9. The answer is generated by local Ollama and stored as an assistant message.
+10. The ticket is updated with title, summary, category, preview, and timestamps.
+
+## Notes
+
+- If `userId` is not present in `data/users.json`, the chat still works. The prompt receives an explicit note that user context is missing.
+- If Ollama is unavailable, `POST /api/chat` returns a controlled `503` error instead of crashing the server.
+- If the knowledge-base index is missing, the server warms it on startup and can rebuild it lazily on demand.
+- Data survives server restart because tickets and messages are stored on disk in `runtime/`.

@@ -1,0 +1,51 @@
+{
+  "users": [
+    {
+      "id": "u_001",
+      "accountId": "acc_1001",
+      "fullName": "Alex Petrov",
+      "email": "alex.petrov@example.test",
+      "plan": "pro",
+      "accountStatus": "active",
+      "locale": "ru-RU",
+      "timezone": "Europe/Moscow",
+      "joinedAt": "2024-02-14T09:30:00.000Z",
+      "lastLoginAt": "2026-03-31T18:42:00.000Z",
+      "billingState": "ok",
+      "subscriptionRenewalAt": "2026-04-15T00:00:00.000Z",
+      "recentSignals": [
+        {
+          "type": "login_device_change",
+          "at": "2026-03-31T18:40:00.000Z",
+          "details": "New Android device detected"
+        },
+        {
+          "type": "failed_login_attempts",
+          "at": "2026-03-31T18:35:00.000Z",
+          "details": "Three failed attempts before successful login"
+        }
+      ]
+    },
+    {
+      "id": "u_002",
+      "accountId": "acc_1002",
+      "fullName": "Maria Volkova",
+      "email": "maria.volkova@example.test",
+      "plan": "basic",
+      "accountStatus": "active",
+      "locale": "en-US",
+      "timezone": "Europe/Moscow",
+      "joinedAt": "2025-09-10T07:00:00.000Z",
+      "lastLoginAt": "2026-03-29T11:20:00.000Z",
+      "billingState": "past_due",
+      "subscriptionRenewalAt": "2026-04-02T00:00:00.000Z",
+      "recentSignals": [
+        {
+          "type": "payment_declined",
+          "at": "2026-03-28T06:10:00.000Z",
+          "details": "Issuer declined recurring renewal"
+        }
+      ]
+    }
+  ]
+}
