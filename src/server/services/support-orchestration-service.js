@@ -1,26 +1,7 @@
 import { createHttpError } from "../utils/http.js";
-import { nowIso, truncate } from "../utils/text.js";
-
-const SUPPORT_SYSTEM_PROMPT = [
-  "You are a support assistant.",
-  "Answer clearly, briefly, and only from the provided context.",
-  "Use the ticket summary, recent messages, user context, and knowledge-base excerpts.",
-  "Do not invent internal data, policies, or technical facts that are not in context.",
-  "Do not invent UI paths, URLs, wait times, or account actions that are not explicitly present in context.",
-  "If the diagnosis is uncertain, say that explicitly and use careful probabilistic wording.",
-  "Start with the most likely explanation or current known state.",
-  "Then give concrete resolution steps.",
-  "If self-service is not enough, say when to contact a human operator.",
-  "Always reply in the same language as the latest user message.",
-].join(" ");
-
-function detectPreferredLanguage(text) {
-  if (/[А-Яа-яЁё]/.test(text)) {
-    return "Russian";
-  }
-
-  return "English";
-}
+import { normalizeWhitespace, nowIso, truncate } from "../utils/text.js";
+import { buildSupportActionPrompt, SUPPORT_ACTION_SYSTEM_PROMPT } from "../prompts/support-action-prompt.js";
+import { parseSupportActionDecision } from "./support-action-decision.js";
 
 function createSourceLinkPath(sourcePath) {
   const normalizedPath = String(sourcePath || "").replace(/^\/+/, "");
@@ -36,6 +17,8 @@ export class SupportOrchestrationService {
     userContextService,
     summarizationService,
     ollamaClient,
+    ticketToolService,
+    ticketsMcpClient,
     config,
   }) {
     this.ticketsRepository = ticketsRepository;
@@ -44,6 +27,8 @@ export class SupportOrchestrationService {
     this.userContextService = userContextService;
     this.summarizationService = summarizationService;
     this.ollamaClient = ollamaClient;
+    this.ticketToolService = ticketToolService;
+    this.ticketsMcpClient = ticketsMcpClient;
     this.config = config;
   }
 
@@ -65,17 +50,14 @@ export class SupportOrchestrationService {
     return this.ticketsRepository.create({ userId });
   }
 
-  async closeTicket(ticketId) {
-    const ticket = await this.ticketsRepository.getById(ticketId);
+  async closeTicket(ticketId, reason = null) {
+    const result = await this.ticketToolService.closeTicket(ticketId, reason);
 
-    if (!ticket) {
+    if (result.code === "TICKET_NOT_FOUND") {
       throw createHttpError(404, "Ticket not found.");
     }
 
-    return this.ticketsRepository.update(ticketId, {
-      status: "closed",
-      updatedAt: nowIso(),
-    });
+    return result.ticket;
   }
 
   async handleChat({ userId, ticketId, message }) {
@@ -135,115 +117,129 @@ export class SupportOrchestrationService {
       })),
     ]);
 
-    const prompt = this.buildAnswerPrompt({
+    const prompt = buildSupportActionPrompt({
       ticket,
       summaryPayload,
       messages,
       latestUserMessage: safeMessage,
       ragChunks,
       userContext,
+      recentMessagesLimit: this.config.recentMessagesLimit,
     });
 
-    const answer = await this.ollamaClient.generate({
+    const rawDecision = await this.ollamaClient.generate({
       model: this.config.chatModel,
-      system: SUPPORT_SYSTEM_PROMPT,
+      system: SUPPORT_ACTION_SYSTEM_PROMPT,
       prompt,
+      format: "json",
       temperature: 0.2,
       timeoutMs: 90000,
     });
 
-    const answerSources = this.buildAnswerSources(ragChunks);
+    const decision = parseSupportActionDecision(rawDecision);
+    const outcome = await this.resolveAssistantOutcome({
+      ticket,
+      latestUserMessage: safeMessage,
+      decision,
+      ragChunks,
+    });
+    const answerSources = outcome.includeSources ? this.buildAnswerSources(ragChunks) : [];
     const assistantMessage = await this.messagesRepository.create({
       ticketId: ticket.id,
       role: "assistant",
-      text: answer,
+      text: outcome.answer,
       sources: answerSources,
     });
 
-    const updatedTicket = await this.ticketsRepository.update(ticket.id, {
+    const updatedTicket = await this.ticketsRepository.update(outcome.ticket.id, {
       title: summaryPayload.title || ticket.title,
       summary: summaryPayload.summary,
-      category: summaryPayload.category || ticket.category || null,
-      lastMessagePreview: truncate(answer || safeMessage, 160),
+      category: summaryPayload.category || outcome.ticket.category || ticket.category || null,
+      lastMessagePreview: truncate(outcome.answer || safeMessage, 160),
       updatedAt: nowIso(),
     });
 
     return {
       ticketId: updatedTicket.id,
-      answer,
+      answer: outcome.answer,
       sources: answerSources,
       assistantMessage,
       ticket: updatedTicket,
     };
   }
 
-  buildAnswerPrompt({ ticket, summaryPayload, messages, latestUserMessage, ragChunks, userContext }) {
-    const preferredLanguage = detectPreferredLanguage(latestUserMessage);
-    const recentMessages = messages.slice(-this.config.recentMessagesLimit).map((message) => ({
-      role: message.role,
-      text: message.text,
-      createdAt: message.createdAt,
-    }));
+  async resolveAssistantOutcome({ ticket, latestUserMessage, decision, ragChunks }) {
+    if (decision.type !== "tool_call") {
+      return {
+        answer: decision.message,
+        ticket,
+        includeSources: true,
+      };
+    }
 
-    const ticketMetadata = {
+    const requestedTicketId = decision.arguments.ticketId;
+    const forcedArguments = {
       ticketId: ticket.id,
-      userId: ticket.userId,
-      status: ticket.status,
-      createdAt: ticket.createdAt,
-      updatedAt: ticket.updatedAt,
-      currentCategory: summaryPayload.category || ticket.category || null,
-      messageCount: messages.length,
+      reason: decision.arguments.reason || this.buildFallbackCloseReason(latestUserMessage),
     };
 
-    const formattedKnowledge = ragChunks.length
-      ? ragChunks
-          .map(
-            (chunk, index) =>
-              `[Doc ${index + 1}] ${chunk.title} (${chunk.source}, score=${chunk.score})\n${chunk.text}`
-          )
-          .join("\n\n")
-      : "No matching knowledge-base excerpts were retrieved.";
+    console.info("[chat][tool_request]", {
+      tool: decision.tool,
+      requestedTicketId,
+      forcedTicketId: forcedArguments.ticketId,
+      arguments: forcedArguments,
+    });
 
-    return [
-      "Support context follows. Use it as the only source of truth.",
-      `Required response language: ${preferredLanguage}.`,
-      "",
-      "Ticket summary:",
-      summaryPayload.summary || "(empty)",
-      "",
-      "Latest user message:",
-      latestUserMessage,
-      "",
-      "Ticket metadata:",
-      JSON.stringify(ticketMetadata, null, 2),
-      "",
-      "Recent messages:",
-      JSON.stringify(recentMessages, null, 2),
-      "",
-      "User context from MCP-like integration layer:",
-      JSON.stringify(
-        userContext.found
-          ? {
-              account: userContext.accountContext,
-              recentSignals: userContext.recentSignals,
-            }
-          : {
-              found: false,
-              note: "User context not found in local CRM JSON source. Do not assume account details.",
-            },
-        null,
-        2
-      ),
-      "",
-      "Knowledge-base excerpts:",
-      formattedKnowledge,
-      "",
-      "Answer format:",
-      "- First paragraph: likely cause or what is known now",
-      "- Then short step-by-step actions",
-      "- Mention uncertainty when needed",
-      "- Escalate to a human operator only when appropriate",
-    ].join("\n");
+    let toolResult;
+
+    try {
+      toolResult = await this.ticketsMcpClient.callTool(decision.tool, forcedArguments);
+    } catch (error) {
+      console.warn("[chat][tool_failure]", {
+        tool: decision.tool,
+        ticketId: ticket.id,
+        message: error.message,
+      });
+
+      return {
+        answer: this.buildToolFailureMessage(latestUserMessage),
+        ticket,
+        includeSources: false,
+      };
+    }
+
+    console.info("[chat][tool_result]", {
+      tool: decision.tool,
+      arguments: forcedArguments,
+      ok: toolResult?.ok ?? false,
+      code: toolResult?.code || null,
+      status: toolResult?.status || null,
+    });
+
+    if (!toolResult?.ok) {
+      return {
+        answer: this.buildToolFailureMessage(latestUserMessage),
+        ticket,
+        includeSources: false,
+      };
+    }
+
+    const updatedTicket = toolResult.ticket || (await this.ticketsRepository.getById(ticket.id)) || ticket;
+    const answer =
+      toolResult.code === "ALREADY_CLOSED"
+        ? this.buildAlreadyClosedMessage(latestUserMessage)
+        : decision.messageAfterTool;
+
+    console.info("[chat][ticket_status]", {
+      ticketId: updatedTicket.id,
+      status: updatedTicket.status,
+    });
+
+    return {
+      answer,
+      ticket: updatedTicket,
+      includeSources: false,
+    };
   }
 
   buildAnswerSources(ragChunks) {
@@ -255,5 +251,26 @@ export class SupportOrchestrationService {
       excerpt: truncate(chunk.text, 220),
       url: createSourceLinkPath(chunk.source),
     }));
+  }
+
+  buildFallbackCloseReason(latestUserMessage) {
+    const cleanMessage = normalizeWhitespace(latestUserMessage || "");
+    return truncate(cleanMessage || "User confirmed issue resolved.", 240);
+  }
+
+  buildToolFailureMessage(latestUserMessage) {
+    if (/[А-Яа-яЁё]/.test(latestUserMessage)) {
+      return "Похоже, вопрос решён, но я не смог закрыть тикет автоматически. Он пока останется открытым.";
+    }
+
+    return "It looks resolved, but I could not close the ticket automatically, so it remains open for now.";
+  }
+
+  buildAlreadyClosedMessage(latestUserMessage) {
+    if (/[А-Яа-яЁё]/.test(latestUserMessage)) {
+      return "Этот тикет уже закрыт.";
+    }
+
+    return "This ticket is already closed.";
   }
 }

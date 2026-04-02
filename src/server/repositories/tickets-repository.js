@@ -26,6 +26,8 @@ export class TicketsRepository {
       status: "open",
       summary: "",
       category: null,
+      closeReason: null,
+      closedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
       lastMessagePreview: "",

@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/server/main.js",
-    "serve": "node src/server/main.js"
+    "serve": "node src/server/main.js",
+    "start:mcp": "node src/server/mcp/tickets-mcp-server.js",
+    "test": "node --test src/server/tests/*.test.js"
   }
 }

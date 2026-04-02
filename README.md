@@ -1,23 +1,53 @@
 # Support Chat Demo
 
-Minimal support chat with a local frontend and a backend that models a realistic support pipeline:
+Minimal local support assistant with one important MCP tool: `close_ticket`.
 
-`create/load ticket -> save messages -> update summary -> retrieve RAG context -> load user context -> ask Ollama -> save answer`
+Architecture stays deliberately boring:
+
+- frontend sends messages to `POST /api/chat`
+- backend stores ticket state and messages in local JSON files
+- backend builds summary, RAG context, and user context deterministically
+- Ollama decides either:
+  - answer normally
+  - call `close_ticket`
+- backend calls a real MCP server over `stdio`
+- MCP server updates the same shared ticket storage used by the backend
+
+No external agent platform. No extra orchestration layer. One tool, one process, one shared source of truth.
 
 ## Stack
 
-- Frontend: plain HTML/CSS/JS from the existing project.
-- Backend: zero-dependency Node `http` server.
-- Storage: local JSON files in `runtime/`.
-- LLM: local Ollama.
+- Frontend: plain HTML/CSS/JS
+- Backend: zero-dependency Node `http` server
+- MCP server: separate Node process over `stdio`
+- Storage: local JSON files in `runtime/`
+- LLM: local Ollama
 - Models:
   - chat: `qwen3:8b`
   - summarization: `qwen3:8b`
   - embeddings: `embeddinggemma`
 
+## Why this MCP approach
+
+This project now uses a custom minimal MCP client/server loop instead of `ollama-mcp-bridge`.
+
+Reason:
+
+- the current backend already owns the deterministic support pipeline
+- Ollama integration is already local and simple
+- only one real tool is needed
+- `stdio` MCP is the shortest reliable path here
+
+So the design is:
+
+1. backend asks Ollama for strict JSON action output
+2. if Ollama returns `tool_call`, backend invokes the MCP server
+3. MCP server closes the ticket in shared storage
+4. backend saves final assistant message and returns updated ticket state
+
 ## Run
 
-1. Start Ollama and pull required models:
+### 1. Start Ollama
 
 ```bash
 ollama pull qwen3:8b
@@ -25,15 +55,29 @@ ollama pull embeddinggemma
 ollama serve
 ```
 
-2. Start the app:
+### 2. Start the MCP server
+
+This is optional if you only run the main backend, because the backend will spawn it automatically on first tool call.
+
+For manual inspection:
+
+```bash
+npm run start:mcp
+```
+
+### 3. Start the backend
 
 ```bash
 npm start
 ```
 
-3. Open [http://127.0.0.1:3000](http://127.0.0.1:3000)
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000)
 
-The same process serves both the UI and `/api/*`.
+## Test
+
+```bash
+npm test
+```
 
 ## API
 
@@ -44,80 +88,128 @@ The same process serves both the UI and `/api/*`.
 - `POST /api/tickets/:ticketId/close`
 - `POST /api/chat`
 
-`POST /api/tickets` body:
-
-```json
-{
-  "userId": "u_001"
-}
-```
-
 `POST /api/chat` body:
 
 ```json
 {
   "userId": "u_001",
   "ticketId": null,
-  "message": "Почему не работает авторизация?"
+  "message": "thanks, it works now"
 }
 ```
 
-Response:
+Possible response after tool execution:
 
 ```json
 {
-  "ticketId": "t_xxx",
-  "answer": "text",
+  "ticketId": "t_123",
+  "answer": "Glad to hear that the issue is resolved. I have closed this ticket.",
   "ticket": {
-    "id": "t_xxx",
-    "userId": "u_001",
-    "title": "Login issue after MFA",
-    "status": "open",
-    "summary": "User cannot sign in after changing device...",
-    "category": "login",
-    "createdAt": "2026-04-01T18:00:00.000Z",
-    "updatedAt": "2026-04-01T18:01:00.000Z",
-    "lastMessagePreview": "Most likely..."
+    "id": "t_123",
+    "title": "Login issue",
+    "status": "closed",
+    "summary": "User could not sign in, then confirmed the issue is fixed.",
+    "closeReason": "User confirmed issue resolved",
+    "closedAt": "2026-04-02T10:00:00.000Z",
+    "updatedAt": "2026-04-02T10:00:01.000Z"
   }
 }
 ```
 
-## Structure
+## MCP Tools
 
-- `src/app.js` - frontend UI and support-flow behavior.
-- `src/support-api.js` - frontend client for the backend.
-- `src/server/main.js` - Node server, routing, static files.
-- `src/server/repositories/` - persistent ticket/message storage.
-- `src/server/services/ollama-client.js` - local Ollama client.
-- `src/server/services/summarization-service.js` - ticket summary/title/category updates.
-- `src/server/services/knowledge-base-service.js` - chunking, embeddings, local retrieval.
-- `src/server/services/user-context-service.js` - MCP-like local CRM integration from JSON.
-- `src/server/services/support-orchestration-service.js` - main support pipeline.
-- `data/users.json` - mock CRM/user context source.
-- `knowledge_base/` - local documents for retrieval.
-- `runtime/` - generated tickets, messages, and embedding index.
+The standalone MCP server is in [src/server/mcp/tickets-mcp-server.js](/Users/aura/Desktop/support_chat/src/server/mcp/tickets-mcp-server.js).
 
-## How the pipeline works
+Tools:
 
-1. `POST /api/chat` creates a ticket if `ticketId` is absent.
-2. The server rejects writes to closed tickets with a clear `409` error.
-3. The user message is persisted immediately.
-4. The server rebuilds the ticket summary with `qwen3:8b`, keeping summary state in the ticket.
-5. Retrieval query is built from `ticket summary + latest user message`.
-6. The RAG layer reads `knowledge_base/`, chunks documents, builds embeddings through Ollama, stores the index in `runtime/knowledge-index.json`, and returns top-k relevant chunks.
-7. The MCP-like user context layer reads `data/users.json` and returns structured account context plus recent signals.
-8. The server assembles the final prompt from:
-   - ticket summary
-   - recent messages
-   - user context
-   - ticket metadata
-   - retrieved docs
-9. The answer is generated by local Ollama and stored as an assistant message.
-10. The ticket is updated with title, summary, category, preview, and timestamps.
+- `close_ticket(ticketId, reason?)`
+- `get_ticket_status(ticketId)`
 
-## Notes
+Main behavior of `close_ticket`:
 
-- If `userId` is not present in `data/users.json`, the chat still works. The prompt receives an explicit note that user context is missing.
-- If Ollama is unavailable, `POST /api/chat` returns a controlled `503` error instead of crashing the server.
-- If the knowledge-base index is missing, the server warms it on startup and can rebuild it lazily on demand.
-- Data survives server restart because tickets and messages are stored on disk in `runtime/`.
+- if ticket does not exist, returns structured error result
+- if ticket is already closed, returns structured non-fatal result
+- if ticket is open, sets:
+  - `status = closed`
+  - `closedAt = now`
+  - `closeReason = reason`
+  - `updatedAt = now`
+
+The MCP client adapter used by the backend is in [src/server/mcp/tickets-mcp-client.js](/Users/aura/Desktop/support_chat/src/server/mcp/tickets-mcp-client.js).
+
+## Pipeline
+
+`POST /api/chat` now works like this:
+
+1. validate `userId`, `ticketId`, and message
+2. create ticket if needed
+3. store user message
+4. update ticket summary
+5. retrieve RAG context from `knowledge_base/`
+6. load user context from local JSON data
+7. ask Ollama for a strict JSON decision:
+   - `{"action":"respond","message":"..."}`
+   - `{"action":"tool_call","tool":"close_ticket",...}`
+8. if Ollama returns `respond`:
+   - save assistant message
+   - keep ticket open
+9. if Ollama returns `tool_call`:
+   - backend calls MCP server over `stdio`
+   - MCP server updates shared ticket storage
+   - backend saves final assistant message
+   - backend returns updated closed ticket
+
+Important guardrail:
+
+- backend does not trust the model's `ticketId` blindly
+- the tool call is forced onto the active ticket id from the request context
+
+## Prompting Policy
+
+Prompt text is isolated in [src/server/prompts/support-action-prompt.js](/Users/aura/Desktop/support_chat/src/server/prompts/support-action-prompt.js).
+
+Core rules:
+
+- only close when the user explicitly confirms resolution or explicitly asks to close
+- never close immediately after assistant advice without confirmation
+- when uncertain, keep the ticket open
+- return strict JSON only
+
+## Storage
+
+Shared storage is file-based:
+
+- [runtime/tickets.json](/Users/aura/Desktop/support_chat/runtime/tickets.json)
+- [runtime/messages.json](/Users/aura/Desktop/support_chat/runtime/messages.json)
+
+The backend and the MCP server both use the same ticket repository format, so a ticket closed through MCP is immediately visible to the backend and UI.
+
+## Error Handling
+
+Handled cases:
+
+- Ollama unavailable: backend returns controlled error instead of crashing
+- invalid model JSON: backend falls back to a safe assistant response
+- invalid or unknown tool call: backend does not crash and keeps ticket open
+- MCP unavailable: backend returns a safe user-facing fallback and leaves ticket open
+- ticket not found: structured MCP result, or HTTP `404` on direct backend route
+- already closed ticket: graceful structured MCP result
+
+## Audit Logs
+
+Backend logs:
+
+- when model requests `close_ticket`
+- arguments passed to the tool
+- MCP success or failure
+- final ticket status
+
+## Manual Scenario
+
+1. User opens a ticket and writes about a problem.
+2. Assistant replies with troubleshooting steps.
+3. User writes: `thanks, it works now`
+4. Ollama returns a `close_ticket` action
+5. Backend calls the MCP server
+6. MCP server closes the ticket in shared storage
+7. Backend returns assistant confirmation and `ticket.status = "closed"`

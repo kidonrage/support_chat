@@ -19,4 +19,6 @@ export const config = {
   requestBodyLimitBytes: 64 * 1024,
   recentMessagesLimit: 8,
   ragTopK: 4,
+  mcpStartupTimeoutMs: Number.parseInt(process.env.MCP_STARTUP_TIMEOUT_MS || "5000", 10),
+  mcpRequestTimeoutMs: Number.parseInt(process.env.MCP_REQUEST_TIMEOUT_MS || "5000", 10),
 };

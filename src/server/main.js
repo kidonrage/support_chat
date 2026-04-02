@@ -12,6 +12,8 @@ import { KnowledgeBaseService } from "./services/knowledge-base-service.js";
 import { UserContextService } from "./services/user-context-service.js";
 import { SummarizationService } from "./services/summarization-service.js";
 import { SupportOrchestrationService } from "./services/support-orchestration-service.js";
+import { TicketToolService } from "./services/ticket-tool-service.js";
+import { TicketsMcpClient } from "./mcp/tickets-mcp-client.js";
 
 const ticketsStore = new JsonFileStore(config.ticketsFilePath, { tickets: [] });
 const messagesStore = new JsonFileStore(config.messagesFilePath, { messages: [] });
@@ -45,6 +47,14 @@ const summarizationService = new SummarizationService({
   ollamaClient,
   model: config.summaryModel,
 });
+const ticketToolService = new TicketToolService({
+  ticketsRepository,
+});
+const ticketsMcpClient = TicketsMcpClient.createDefault({
+  projectRoot: config.projectRoot,
+  startupTimeoutMs: config.mcpStartupTimeoutMs,
+  requestTimeoutMs: config.mcpRequestTimeoutMs,
+});
 const supportService = new SupportOrchestrationService({
   ticketsRepository,
   messagesRepository,
@@ -52,6 +62,8 @@ const supportService = new SupportOrchestrationService({
   userContextService,
   summarizationService,
   ollamaClient,
+  ticketToolService,
+  ticketsMcpClient,
   config,
 });
 
@@ -121,7 +133,14 @@ async function handleRequest(request, response, url) {
 
   if (request.method === "POST" && /^\/api\/tickets\/[^/]+\/close$/.test(url.pathname)) {
     const ticketId = decodeURIComponent(url.pathname.split("/")[3]);
-    const ticket = await supportService.closeTicket(ticketId);
+    const body = await readJsonBody(request, config.requestBodyLimitBytes).catch((error) => {
+      if (error.statusCode === 415) {
+        return {};
+      }
+
+      throw error;
+    });
+    const ticket = await supportService.closeTicket(ticketId, body.reason ? String(body.reason) : null);
     sendJson(response, 200, { ticket });
     return;
   }
@@ -152,9 +171,24 @@ async function bootstrap() {
   });
 
   const server = http.createServer(routeRequest);
+  server.on("error", (error) => {
+    console.error("Server listen failed:", error.message);
+    process.exit(1);
+  });
   server.listen(config.port, config.host, () => {
     console.log(`Support server listening on http://${config.host}:${config.port}`);
   });
+
+  const shutdown = () => {
+    void ticketsMcpClient.close().finally(() => {
+      server.close(() => {
+        process.exit(0);
+      });
+    });
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 bootstrap().catch((error) => {
